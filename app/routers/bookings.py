@@ -5,6 +5,7 @@ from app.models.models import Booking, BookingStatus, User
 from app.dependencies import get_current_user
 from datetime import datetime
 import uuid
+from typing import Optional
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
 
@@ -19,7 +20,12 @@ def create_booking(
     pet_fee_total: float = 0.0,
     external_id: str = None,  # hotel_id or flight_id from API if available
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    trip_id: str = None,
+    departure_time: str = None,
+    arrival_time: str = None,
+    origin_airport_code: str = None,
+    destination_airport_code: str = None,
 ):
     if booking_type not in ["hotel", "flight"]:
         raise HTTPException(
@@ -36,8 +42,11 @@ def create_booking(
             detail="End date must be after start date"
         )
 
+    trip_uuid = trip_id if trip_id else uuid.uuid4()
+
     booking = Booking(
         id=uuid.uuid4(),
+        trip_id=trip_uuid,
         tenant_id=current_user.tenant_id,
         user_id=current_user.id,
         booking_type=booking_type,
@@ -47,6 +56,10 @@ def create_booking(
         check_out=end_dt,
         total_amount=total_amount,
         pet_fee_total=pet_fee_total,
+        departure_time=departure_time,
+        arrival_time=arrival_time,
+        origin_airport_code=origin_airport_code,
+        destination_airport_code=destination_airport_code,
         status=BookingStatus.pending
     )
 
@@ -76,48 +89,95 @@ def get_my_bookings(
     bookings = db.query(Booking).filter(
         Booking.user_id == current_user.id,
         Booking.tenant_id == current_user.tenant_id
-    ).all()
+    ).order_by(Booking.check_in.asc()).all()
 
-    return {
-        "bookings": [
-            {
-                "booking_id": str(b.id),
-                "booking_type": b.booking_type,
-                "item_name": b.item_name,
-                "external_id": b.external_id,
-                "start_date": str(b.check_in),
-                "end_date": str(b.check_out),
-                "status": b.status,
-                "total_amount": b.total_amount,
-                "pet_fee_total": b.pet_fee_total
+    grouped_trips = {}
+
+    for b in bookings:
+        group_key = str(b.trip_id or b.id)
+
+        if group_key not in grouped_trips:
+            grouped_trips[group_key] = {
+                "bookingId": group_key,
+                "userId": str(b.user_id),
+                "tenantId": str(b.tenant_id),
+                "startDate": b.check_in.strftime("%Y-%m-%d") if b.check_in else None,
+                "endDate": b.check_out.strftime("%Y-%m-%d") if b.check_out else None,
+                "status": str(b.status.value if hasattr(b.status, "value") else b.status),
+                "flightReservations": [],
+                "hotelReservations": [],
             }
-            for b in bookings
-        ]
-    }
 
+        trip = grouped_trips[group_key]
 
-@router.patch("/{booking_id}/cancel")
-def cancel_booking(
-    booking_id: str,
+        if b.check_in and trip["startDate"]:
+            if b.check_in.strftime("%Y-%m-%d") < trip["startDate"]:
+                trip["startDate"] = b.check_in.strftime("%Y-%m-%d")
+
+        if b.check_out and trip["endDate"]:
+            if b.check_out.strftime("%Y-%m-%d") > trip["endDate"]:
+                trip["endDate"] = b.check_out.strftime("%Y-%m-%d")
+
+        booking_type = b.booking_type.value if hasattr(b.booking_type, "value") else b.booking_type
+        booking_type = str(booking_type).lower()
+
+        if booking_type == "flight":
+            trip["flightReservations"].append({
+                "Reservation_No": str(b.id),
+                "Airline_Code": "N/A",
+                "Flight_Number": b.item_name,
+                "Origin_Airport_Code": b.origin_airport_code or "N/A",
+                "Destination_Airport_Code": b.destination_airport_code or "N/A",
+                "Departure_Date": b.check_in.strftime("%Y-%m-%d") if b.check_in else None,
+                "Departure_Time": b.departure_time or "N/A",
+                "Arrive_Date": b.check_out.strftime("%Y-%m-%d") if b.check_out else None,
+                "Arrive_Time": b.arrival_time or "N/A",
+                "Rate": float(b.total_amount or 0),
+            })
+
+        elif booking_type == "hotel":
+            trip["hotelReservations"].append({
+                "Reservation_No": str(b.id),
+                "Hotel_Name": b.item_name,
+                "Check_In_Date": b.check_in.strftime("%Y-%m-%d") if b.check_in else None,
+                "Check_In_Time": "3:00 PM",
+                "Check_Out_Date": b.check_out.strftime("%Y-%m-%d") if b.check_out else None,
+                "Check_Out_Time": "11:00 AM",
+                "Rate": float(b.total_amount or 0),
+            })
+
+    return list(grouped_trips.values())
+
+@router.patch("/trips/{trip_id}/cancel")
+def cancel_trip_booking(
+    trip_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    booking = db.query(Booking).filter(
-        Booking.id == uuid.UUID(booking_id),
+    trip_uuid = uuid.UUID(trip_id)
+
+    bookings = db.query(Booking).filter(
         Booking.user_id == current_user.id,
-        Booking.tenant_id == current_user.tenant_id
-    ).first()
+        Booking.tenant_id == current_user.tenant_id,
+        (
+            (Booking.trip_id == trip_uuid) |
+            (Booking.id == trip_uuid)
+        )
+    ).all()
 
-    if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
+    if not bookings:
+        raise HTTPException(status_code=404, detail="Trip booking not found")
 
-    if booking.status == BookingStatus.cancelled:
-        raise HTTPException(status_code=400, detail="Booking already cancelled")
+    if all(booking.status == BookingStatus.cancelled for booking in bookings):
+        raise HTTPException(status_code=400, detail="Trip already cancelled")
 
-    booking.status = BookingStatus.cancelled
+    for booking in bookings:
+        booking.status = BookingStatus.cancelled
+
     db.commit()
 
     return {
-        "message": "Booking cancelled",
-        "booking_id": booking_id
+        "message": "Trip booking cancelled",
+        "trip_id": trip_id,
+        "cancelled_count": len(bookings)
     }

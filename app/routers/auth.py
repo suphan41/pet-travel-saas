@@ -64,5 +64,9 @@ def login(
 
     return {
         "access_token": token,
+        "name": user.name,
+        "email": user.email,
+        "id": str(user.id),
+        "tenant_id": str(user.tenant_id),
         "token_type": "bearer"
     }

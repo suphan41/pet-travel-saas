@@ -63,6 +63,8 @@ class Booking(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
+    trip_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 
@@ -82,6 +84,11 @@ class Booking(Base):
 
     status = Column(Enum(BookingStatus), default=BookingStatus.pending)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    departure_time = Column(String, nullable=True)
+    arrival_time = Column(String, nullable=True)
+    origin_airport_code = Column(String, nullable=True)
+    destination_airport_code = Column(String, nullable=True)
 
     tenant = relationship("Tenant", back_populates="bookings")
     user = relationship("User", back_populates="bookings")
